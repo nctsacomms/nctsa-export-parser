@@ -152,6 +152,44 @@ func TestVerify_EmptyText(t *testing.T) {
 	assertContainsIssue(t, errs, "no extractable text")
 }
 
+func TestParseEventName(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		expected string
+	}{
+		{
+			name: "team event - chapter",
+			text: "HS C\nHAPTER\n T\nEAM\n (HS)\nS\nEMI\n",
+			expected: "HS Chapter Team",
+		},
+		{
+			name: "individual event - photo",
+			text: "HS P\nHOTOGRAPHIC\n T\nECHNOLOGY\n (HS)\nS\nEMI\n",
+			expected: "HS Photographic Technology",
+		},
+		{
+			name: "multi-word - future tech teacher",
+			text: "HS F\nUTURE\n T\nECHNOLOGY\n \nAND\n E\nNGINEERING\n T\nEACHER\n (HS)\nS\n",
+			expected: "HS Future Technology And Engineering Teacher",
+		},
+		{
+			name: "middle school event",
+			text: "MS C\nAREER\n P\nREP\n (MS)\nS\nEMI\n",
+			expected: "MS Career Prep",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseEventName(tt.text)
+			if got != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, got)
+			}
+		})
+	}
+}
+
 func TestClassifyEvent_Team(t *testing.T) {
 	text := `Participant ID
 School

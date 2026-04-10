@@ -19,6 +19,7 @@ const (
 // Result represents a fully parsed NCTSA results PDF.
 // Exactly one of TeamResult or IndividualResult will be non-nil.
 type Result struct {
+	EventName  string
 	EventType  EventType
 	Team       *TeamResult
 	Individual *IndividualResult
@@ -68,6 +69,7 @@ func Parse(pdfPath string) (Result, error) {
 	}
 
 	eventType := classifyEvent(text)
+	eventName := parseEventName(text)
 	cleaned := cleanLines(text)
 
 	switch eventType {
@@ -77,6 +79,7 @@ func Parse(pdfPath string) (Result, error) {
 			return Result{}, fmt.Errorf("parsing team participants: %w", err)
 		}
 		return Result{
+			EventName: eventName,
 			EventType: TeamEvent,
 			Team:      &TeamResult{Participants: participants},
 		}, nil
@@ -86,6 +89,7 @@ func Parse(pdfPath string) (Result, error) {
 			return Result{}, fmt.Errorf("parsing individual participants: %w", err)
 		}
 		return Result{
+			EventName:  eventName,
 			EventType:  IndividualEvent,
 			Individual: &IndividualResult{Participants: participants},
 		}, nil
@@ -225,6 +229,49 @@ func classifyEvent(text string) EventType {
 		}
 	}
 	return TeamEvent
+}
+
+// parseEventName reconstructs the event name from the fragmented small-caps title.
+// It concatenates all raw lines up to and including the "(XX)" abbreviation line,
+// then strips the parenthesized abbreviation itself.
+func parseEventName(text string) string {
+	var titleParts []string
+	for _, line := range strings.Split(text, "\n") {
+		// Whitespace-only lines act as word separators in the small-caps rendering.
+		if strings.TrimSpace(line) == "" {
+			if len(titleParts) > 0 {
+				titleParts = append(titleParts, " ")
+			}
+			continue
+		}
+		// Preserve leading spaces — they indicate word boundaries.
+		// A line like " T" starts a new word; "EAM" continues the previous.
+		titleParts = append(titleParts, line)
+		if titleAbbrevPattern.MatchString(strings.ToUpper(line)) {
+			break
+		}
+	}
+
+	raw := strings.Join(titleParts, "")
+
+	// Remove the parenthesized abbreviation, e.g. "(HS)"
+	name := titleAbbrevPattern.ReplaceAllString(raw, "")
+	name = strings.TrimSpace(name)
+
+	// Normalize internal whitespace
+	name = strings.Join(strings.Fields(name), " ")
+
+	// Title case: "HS CHAPTER TEAM" -> "HS Chapter Team"
+	words := strings.Fields(name)
+	for i, w := range words {
+		if len(w) <= 2 {
+			// Keep short tokens uppercase (HS, MS, OF, etc. are fine as-is)
+			continue
+		}
+		words[i] = strings.ToUpper(w[:1]) + strings.ToLower(w[1:])
+	}
+
+	return strings.Join(words, " ")
 }
 
 func parseTeamParticipants(lines []string) ([]TeamParticipant, error) {
