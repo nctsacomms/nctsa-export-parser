@@ -1,0 +1,11 @@
+# Output directories
+team_data/
+individual_data/
+unparsed/
+
+# Test/raw data
+raw_data/
+
+# Binaries
+nctsa-parse
+*.exe
