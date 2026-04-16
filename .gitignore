@@ -1,6 +1,8 @@
 # Output directories
 team_data/
 individual_data/
+schedule_data/
+csv_data/
 unparsed/
 
 # Test/raw data

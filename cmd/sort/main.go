@@ -12,9 +12,13 @@ import (
 
 func main() {
 	inputDir := "raw_data"
-	dirs := map[parser.EventType]string{
-		parser.TeamEvent:       "team_data",
-		parser.IndividualEvent: "individual_data",
+	dirs := map[parser.FileType]string{
+		parser.FileTeamSemiFinalist:       "team_data",
+		parser.FileIndividualSemiFinalist: "individual_data",
+		parser.FileSemiFinalistWithScores: "team_data",
+		parser.FileScheduleClean:          "schedule_data",
+		parser.FileScheduleRaw:            "schedule_data",
+		parser.FileCSV:                    "csv_data",
 	}
 	unparsedDir := "unparsed"
 
@@ -29,7 +33,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	var team, individual, unparsed, skipped int
+	counts := make(map[parser.FileType]int)
+	var unparsed, skipped int
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -37,22 +42,27 @@ func main() {
 		}
 		name := entry.Name()
 		src := filepath.Join(inputDir, name)
+		ext := strings.ToLower(filepath.Ext(name))
 
-		if !strings.HasSuffix(strings.ToLower(name), ".pdf") {
+		if ext != ".pdf" && ext != ".csv" {
 			fmt.Printf("SKIP  %s\n", name)
 			skipped++
 			continue
 		}
 
-		issues := parser.Verify(src)
-		if issues != nil {
-			fmt.Printf("COPY  %s -> unparsed/ (%s)\n", name, issues[0])
+		ft, err := parser.Classify(src)
+		if err != nil || ft == parser.FileUnknown {
+			reason := "unknown format"
+			if err != nil {
+				reason = err.Error()
+			}
+			fmt.Printf("COPY  %s -> unparsed/ (%s)\n", name, reason)
 			copyFile(src, filepath.Join(unparsedDir, name))
 			unparsed++
 			continue
 		}
 
-		result, err := parser.Parse(src)
+		_, err = parser.Parse(src)
 		if err != nil {
 			fmt.Printf("COPY  %s -> unparsed/ (%v)\n", name, err)
 			copyFile(src, filepath.Join(unparsedDir, name))
@@ -60,19 +70,19 @@ func main() {
 			continue
 		}
 
-		destDir := dirs[result.EventType]
-		fmt.Printf("SORT  %s -> %s/\n", name, destDir)
+		destDir := dirs[ft]
+		fmt.Printf("SORT  %-15s %s -> %s/\n", "["+string(ft)+"]", name, destDir)
 		copyFile(src, filepath.Join(destDir, name))
-
-		switch result.EventType {
-		case parser.TeamEvent:
-			team++
-		case parser.IndividualEvent:
-			individual++
-		}
+		counts[ft]++
 	}
 
-	fmt.Printf("\nDone: %d team, %d individual, %d unparsed, %d skipped\n", team, individual, unparsed, skipped)
+	fmt.Println()
+	fmt.Println("Summary:")
+	for ft, count := range counts {
+		fmt.Printf("  %-30s %d\n", ft, count)
+	}
+	fmt.Printf("  %-30s %d\n", "unparsed", unparsed)
+	fmt.Printf("  %-30s %d\n", "skipped", skipped)
 }
 
 func copyFile(src, dst string) {

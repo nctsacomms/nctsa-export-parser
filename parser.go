@@ -16,13 +16,16 @@ const (
 	IndividualEvent EventType = "individual"
 )
 
-// Result represents a fully parsed NCTSA results PDF.
-// Exactly one of TeamResult or IndividualResult will be non-nil.
+// Result represents a fully parsed NCTSA export file.
+// Exactly one of Team, Individual, Schedule, or CSV will be non-nil.
 type Result struct {
 	EventName  string
 	EventType  EventType
+	FileType   FileType
 	Team       *TeamResult
 	Individual *IndividualResult
+	Schedule   *ScheduleResult
+	CSV        *CSVResult
 }
 
 // TeamResult holds parsed data from a team event PDF.
@@ -56,16 +59,42 @@ var (
 	pageFooterPattern   = regexp.MustCompile(`(?i)page \d+ of \d+`)
 )
 
-// Parse reads an NCTSA results PDF and returns structured data.
-// Returns an error if the file cannot be read or does not match the expected format.
-func Parse(pdfPath string) (Result, error) {
+// Parse reads an NCTSA export file and returns structured data.
+// Supports PDFs (semi-finalist lists, schedules) and CSV files.
+// Returns an error if the file cannot be read or does not match a known format.
+func Parse(path string) (Result, error) {
+	ft, err := Classify(path)
+	if err != nil {
+		return Result{}, fmt.Errorf("classifying file: %w", err)
+	}
+
+	switch ft {
+	case FileCSV:
+		return parseCSVFile(path)
+	case FileScheduleClean, FileScheduleRaw:
+		return parseScheduleFile(path, ft)
+	case FileTeamSemiFinalist, FileIndividualSemiFinalist, FileSemiFinalistWithScores:
+		return parseSemiFinalistFile(path, ft)
+	default:
+		return Result{}, fmt.Errorf("unknown file type for %s", path)
+	}
+}
+
+// parseSemiFinalistFile handles team, individual, and scored semi-finalist PDFs.
+func parseSemiFinalistFile(pdfPath string, ft FileType) (Result, error) {
 	text, err := extractText(pdfPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("extracting text: %w", err)
 	}
 
-	if issues := verify(text); len(issues) > 0 {
-		return Result{}, fmt.Errorf("format verification failed: %s", strings.Join(issues, "; "))
+	if ft == FileSemiFinalistWithScores {
+		if issues := verifyWithScores(text); len(issues) > 0 {
+			return Result{}, fmt.Errorf("format verification failed: %s", strings.Join(issues, "; "))
+		}
+	} else {
+		if issues := verify(text); len(issues) > 0 {
+			return Result{}, fmt.Errorf("format verification failed: %s", strings.Join(issues, "; "))
+		}
 	}
 
 	eventType := classifyEvent(text)
@@ -74,13 +103,19 @@ func Parse(pdfPath string) (Result, error) {
 
 	switch eventType {
 	case TeamEvent:
-		participants, err := parseTeamParticipants(cleaned)
+		var participants []TeamParticipant
+		if ft == FileSemiFinalistWithScores {
+			participants, err = parseTeamWithScoresParticipants(cleaned)
+		} else {
+			participants, err = parseTeamParticipants(cleaned)
+		}
 		if err != nil {
 			return Result{}, fmt.Errorf("parsing team participants: %w", err)
 		}
 		return Result{
 			EventName: eventName,
 			EventType: TeamEvent,
+			FileType:  ft,
 			Team:      &TeamResult{Participants: participants},
 		}, nil
 	case IndividualEvent:
@@ -91,6 +126,7 @@ func Parse(pdfPath string) (Result, error) {
 		return Result{
 			EventName:  eventName,
 			EventType:  IndividualEvent,
+			FileType:   ft,
 			Individual: &IndividualResult{Participants: participants},
 		}, nil
 	default:
@@ -272,6 +308,107 @@ func parseEventName(text string) string {
 	}
 
 	return strings.Join(words, " ")
+}
+
+var scorePattern = regexp.MustCompile(`^\d+(\.\d+)?$`)
+
+// verifyWithScores checks PDF text that includes a Score column header.
+func verifyWithScores(text string) []string {
+	var issues []string
+
+	lines := cleanLines(text)
+	if len(lines) == 0 {
+		return []string{"PDF contains no extractable text"}
+	}
+
+	joined := strings.Join(lines, " ")
+	upper := strings.ToUpper(joined)
+
+	if !titleAbbrevPattern.MatchString(upper) {
+		issues = append(issues, "missing title with parenthesized event abbreviation, e.g. (HS)")
+	}
+
+	compacted := strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\n' || r == '\r' || r == '\t' {
+			return -1
+		}
+		return r
+	}, upper)
+	resultKeywords := []string{"FINALISTS", "SEMI-FINALISTS", "WINNERS", "RESULTS", "QUALIFIERS"}
+	hasResultType := false
+	for _, kw := range resultKeywords {
+		if strings.Contains(compacted, strings.ReplaceAll(kw, "-", "")) {
+			hasResultType = true
+			break
+		}
+		if strings.Contains(compacted, kw) {
+			hasResultType = true
+			break
+		}
+	}
+	if !hasResultType {
+		issues = append(issues, "missing result type subtitle (e.g. SEMI-FINALISTS, FINALISTS, WINNERS)")
+	}
+
+	headers := []string{"Participant ID", "School", "Division", "Score"}
+	for _, h := range headers {
+		found := false
+		for _, line := range lines {
+			if line == h {
+				found = true
+				break
+			}
+		}
+		if !found {
+			issues = append(issues, fmt.Sprintf("missing table header %q", h))
+		}
+	}
+
+	idCount := 0
+	for _, line := range lines {
+		if anyIDPattern.MatchString(line) {
+			idCount++
+		}
+	}
+	if idCount == 0 {
+		issues = append(issues, "no participant ID rows found (expected format: XXXXX-N or XXXXXXXX)")
+	}
+
+	if !pageFooterPattern.MatchString(joined) {
+		issues = append(issues, "missing page footer (e.g. Page 1 of 1)")
+	}
+
+	return issues
+}
+
+// parseTeamWithScoresParticipants parses team participants, skipping score values.
+func parseTeamWithScoresParticipants(lines []string) ([]TeamParticipant, error) {
+	var participants []TeamParticipant
+
+	for i := 0; i < len(lines); i++ {
+		if teamIDPattern.MatchString(lines[i]) {
+			parts := strings.SplitN(lines[i], "-", 2)
+			p := TeamParticipant{
+				SchoolID:   parts[0],
+				TeamNumber: parts[1],
+			}
+			if i+1 < len(lines) && !anyIDPattern.MatchString(lines[i+1]) && !scorePattern.MatchString(lines[i+1]) {
+				p.School = lines[i+1]
+				i++
+			}
+			// Skip score line if present
+			if i+1 < len(lines) && scorePattern.MatchString(lines[i+1]) {
+				i++
+			}
+			participants = append(participants, p)
+		}
+	}
+
+	if len(participants) == 0 {
+		return nil, fmt.Errorf("no team participant rows found")
+	}
+
+	return participants, nil
 }
 
 func parseTeamParticipants(lines []string) ([]TeamParticipant, error) {
