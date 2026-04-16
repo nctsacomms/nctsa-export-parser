@@ -222,10 +222,21 @@ func parseScheduleRaw(text string) (*ScheduleResult, error) {
 
 	sched := &ScheduleResult{}
 
-	// Extract metadata from "Schedule Name:", "Schedule Date:" lines
+	// The raw export renders the event name on line 1 using a shifted font encoding
+	// (each byte = target - 29). Decode it so callers get e.g. "HS Digital Video Production"
+	// rather than the "Schedule Name" subtitle like "Finalist Interviews". Fall back to
+	// Schedule Name if the decode doesn't look sensible.
+	if decoded := decodeShiftedTitle(lines[0]); decoded != "" {
+		sched.Title = decoded
+	}
+
+	// Extract metadata from "Schedule Name:", "Schedule Date:" lines. Only overwrite the
+	// title from Schedule Name when we couldn't recover a proper event name from line 1.
 	for _, line := range lines {
 		if after, ok := strings.CutPrefix(line, "Schedule Name: "); ok {
-			sched.Title = after
+			if sched.Title == "" {
+				sched.Title = after
+			}
 		}
 		if after, ok := strings.CutPrefix(line, "Schedule Date: "); ok {
 			sched.Date = after
@@ -681,6 +692,36 @@ func joinHyphenatedParts(parts []string) string {
 		}
 	}
 	return result
+}
+
+// decodeShiftedTitle recovers the event title from the raw schedule export's first line.
+// registermychapter.com renders the event name with a font whose glyph codes sit 29 below
+// plain ASCII, so bytes land as e.g. 0x2B/0x36 ("+6") for "HS". We add 29 to each byte and
+// strip the trailing " - Level: N" suffix. Returns "" if the decode doesn't look like an
+// event name, letting callers fall back to the "Schedule Name" line.
+func decodeShiftedTitle(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	b := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c < 0x20 || (c >= 0x21 && c <= 0x7A) {
+			c += 29
+		}
+		b = append(b, c)
+	}
+	decoded := strings.TrimSpace(string(b))
+	// Strip " - Level: N" and similar suffix
+	if idx := strings.Index(decoded, " - Level"); idx > 0 {
+		decoded = strings.TrimSpace(decoded[:idx])
+	}
+	// Sanity check: should look like "HS Something" or "MS Something"
+	upper := strings.ToUpper(decoded)
+	if !strings.HasPrefix(upper, "HS ") && !strings.HasPrefix(upper, "MS ") {
+		return ""
+	}
+	return decoded
 }
 
 // hasLetters returns true if the string contains at least one letter.
